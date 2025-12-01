@@ -10,7 +10,7 @@ export const defaultAnkiSettings: AnkiSettings = {
   sentenceField: 'Back',
   meaningField: '',
   audioField: '',
-  tags: 'epub-reader'
+  tags: ''
 };
 
 const invoke = async (action: string, params: any = {}, settings: AnkiSettings) => {

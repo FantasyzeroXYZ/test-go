@@ -27,3 +27,31 @@ export const generateSpeech = async (text: string, settings: CustomTTSSettings):
         throw new Error("Could not connect to TTS Server. Ensure it is running.");
     }
 };
+
+export const checkConnection = async (settings: CustomTTSSettings): Promise<boolean> => {
+    const baseUrl = `http://${settings.host}:${settings.port}`;
+    // Try hitting the voice endpoint or root to check availability
+    try {
+        const response = await fetch(`${baseUrl}/voice`, { method: 'GET', mode: 'cors' });
+        return response.ok;
+    } catch (e) {
+        return false;
+    }
+};
+
+export const getVoices = async (settings: CustomTTSSettings): Promise<string[]> => {
+    const baseUrl = `http://${settings.host}:${settings.port}`;
+    try {
+        const response = await fetch(`${baseUrl}/voice`, { method: 'GET', mode: 'cors' });
+        if (!response.ok) return [];
+        const data = await response.json();
+        // Assume API returns string[] or {id, name}[]
+        if (Array.isArray(data)) {
+            return data.map((v: any) => typeof v === 'string' ? v : v.id || v.name);
+        }
+        return [];
+    } catch (e) {
+        console.error("Failed to fetch voices", e);
+        return [];
+    }
+};

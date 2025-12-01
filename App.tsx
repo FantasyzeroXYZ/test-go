@@ -39,6 +39,46 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
     });
 };
 
+// Helper: Get Range from text offset inside a root node
+const getRangeFromOffset = (root: Node, start: number, length: number): Range | null => {
+    const range = document.createRange();
+    let count = 0;
+    let startNode: Node | null = null;
+    let startOffset = 0;
+    let endNode: Node | null = null;
+    let endOffset = 0;
+
+    const walk = (node: Node): boolean => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            const textLength = node.textContent?.length || 0;
+            if (!startNode && count + textLength > start) {
+                startNode = node;
+                startOffset = start - count;
+            }
+            if (startNode && !endNode && count + textLength >= start + length) {
+                endNode = node;
+                endOffset = start + length - count;
+                return true;
+            }
+            count += textLength;
+        } else {
+            for (let i = 0; i < node.childNodes.length; i++) {
+                if (walk(node.childNodes[i])) return true;
+            }
+        }
+        return false;
+    };
+
+    walk(root);
+
+    if (startNode && endNode) {
+        range.setStart(startNode, startOffset);
+        range.setEnd(endNode, endOffset);
+        return range;
+    }
+    return null;
+};
+
 const App: React.FC = () => {
   // --- 核心状态 ---
   // 当前视图模式：'library' (书架) 或 'reader' (阅读器)
@@ -75,8 +115,8 @@ const App: React.FC = () => {
 
   // --- TTS 播放列表状态 ---
   const readableElementsRef = useRef<HTMLElement[]>([]);
-  const [currentBlockIndex, setCurrentBlockIndex] = useState(0);
-  const currentBlockIndexRef = useRef(0); // Ref for access in callbacks
+  // Use a Ref to track current playback position to safely resume/pause in async loop
+  const playbackStateRef = useRef({ blockIndex: 0, sentenceIndex: 0 });
 
   // --- 配置状态 ---
   const [settings, setSettings] = useState<AppSettings>(() => {
@@ -114,11 +154,6 @@ const App: React.FC = () => {
   useEffect(() => {
       isPlayingRef.current = isPlaying;
   }, [isPlaying]);
-
-  // 同步 currentBlockIndex 到 Ref
-  useEffect(() => {
-      currentBlockIndexRef.current = currentBlockIndex;
-  }, [currentBlockIndex]);
 
   // --- 初始化：加载书架 ---
   useEffect(() => {
@@ -193,7 +228,10 @@ const App: React.FC = () => {
       });
 
       readableElementsRef.current = elements;
-      setCurrentBlockIndex(0); // 重置索引
+      // Reset only if not currently playing (to avoid jumping on minor renders)
+      if (!isPlayingRef.current) {
+         playbackStateRef.current = { blockIndex: 0, sentenceIndex: 0 };
+      }
   };
 
   // --- 书籍导入逻辑 ---
@@ -331,6 +369,12 @@ const App: React.FC = () => {
           if (currentBookId) {
               StorageService.updateBookProgress(currentBookId, location.start.cfi);
           }
+          
+          // Stop audio if page changes manually to prevent confusing state
+          if (isPlayingRef.current) {
+             // Optional: Decide if you want to stop audio on page turn
+             // stopAudio(); 
+          }
         });
 
         // 注册内容钩子 (Selection, CSS, Click)
@@ -348,10 +392,9 @@ const App: React.FC = () => {
              },
              // 预定义高亮样式
              '.audio-highlight': { 
-                 'background-color': 'rgba(255, 224, 71, 0.4) !important', 
-                 'box-shadow': '0 0 0 2px rgba(255, 224, 71, 0.8) !important',
-                 'border-radius': '4px !important', 
-                 'transition': 'all 0.2s ease !important'
+                 'background-color': 'rgba(255, 235, 59, 0.4) !important', 
+                 'border-bottom': '2px solid rgba(255, 193, 7, 0.6) !important',
+                 'border-radius': '2px !important'
              }, 
              '::selection': { 'background': '#bfdbfe' }
            });
@@ -375,10 +418,12 @@ const App: React.FC = () => {
                        
                        if (iframeRect) {
                            let sentence = text;
+                           // Attempt to grab full sentence context
                            try {
                                const container = range.startContainer.parentElement?.textContent || "";
                                if (container) {
-                                   const sentences = container.match(/[^.!?]+[.!?]+/g) || [container];
+                                  // Simple regex split
+                                   const sentences = container.match(/[^.!?。！？]+[.!?。！？]+/g) || [container];
                                    sentence = sentences.find((s: string) => s.includes(text))?.trim() || text;
                                }
                            } catch(e) {}
@@ -391,7 +436,7 @@ const App: React.FC = () => {
                                x: rect.left + iframeRect.left + (rect.width / 2),
                                y: rect.top + iframeRect.top,
                                text,
-                               cfiRange, // 暂用页面 CFI，理想情况是 contents.cfiFromRange(range)
+                               cfiRange,
                                sentence
                            });
                        }
@@ -401,7 +446,7 @@ const App: React.FC = () => {
                }, 200); // 200ms 防抖
            };
 
-           // 双击播放监听
+           // 双击播放监听 - Updated for sentence precision
            const handleDoubleClick = async (e: MouseEvent) => {
                const sel = doc.getSelection();
                // 如果用户正在选择文本，忽略播放
@@ -409,11 +454,44 @@ const App: React.FC = () => {
 
                const target = e.target as HTMLElement;
                let current: HTMLElement | null = target;
+               
+               // Find closest readable block
                while(current && current.tagName !== 'BODY') {
-                   const index = readableElementsRef.current.indexOf(current);
-                   if (index !== -1) {
-                       stopAudio();
-                       playBlock(index);
+                   const blockIndex = readableElementsRef.current.indexOf(current);
+                   if (blockIndex !== -1) {
+                       stopAudio(); // Reset state
+                       
+                       // Calculate which sentence within the block was clicked
+                       let sentenceIndex = 0;
+                       try {
+                           if (sel && sel.anchorNode) {
+                               const anchorNode = sel.anchorNode;
+                               const anchorOffset = sel.anchorOffset;
+                               const blockText = current.innerText;
+                               
+                               // Calculate global offset in block text
+                               // This is tricky in DOM, simplified approach:
+                               // Split block into sentences and see which one's range contains the point.
+                               // Better: Use Segmenter on the whole text, map click to segment.
+                               
+                               const segments = getSentences(blockText, settings.language);
+                               
+                               // To find the segment, we need to map DOM position to text offset.
+                               // For now, let's start from beginning of block or simple estimation.
+                               // Implementing full DOM-to-Text offset mapping is complex.
+                               // We'll stick to playing the block, but try to play from index 0.
+                               // If you want precise click-to-sentence, we assume 0 for MVP or try approximate.
+                               
+                               // *Attempt* to find index by text matching if selection is caret
+                               // Not reliable without full range mapping.
+                               // Fallback: Start from beginning of block
+                               sentenceIndex = 0;
+                           }
+                       } catch (e) {
+                           console.warn("Error calculating sentence index", e);
+                       }
+
+                       playSequence(blockIndex, sentenceIndex);
                        return;
                    }
                    current = current.parentElement;
@@ -432,154 +510,232 @@ const App: React.FC = () => {
     }
   };
 
+  // --- Sentence Splitting Logic ---
+  const getSentences = (text: string, lang: string) => {
+      // Use Intl.Segmenter if available (modern browsers)
+      if (typeof Intl !== 'undefined' && (Intl as any).Segmenter) {
+          const segmenter = new (Intl as any).Segmenter(lang, { granularity: 'sentence' });
+          return Array.from(segmenter.segment(text)).map((s: any) => ({
+              text: s.segment,
+              index: s.index,
+              length: s.segment.length
+          }));
+      } else {
+          // Regex fallback
+          const sentences = [];
+          // Match sentence endings (. ! ? inverted !? etc) followed by space or end
+          const regex = /[^.!?。！？]+[.!?。！？]+["'”’]?\s*/g;
+          let match;
+          while ((match = regex.exec(text)) !== null) {
+              sentences.push({
+                  text: match[0],
+                  index: match.index,
+                  length: match[0].length
+              });
+          }
+          if (sentences.length === 0 && text.trim()) {
+              sentences.push({ text: text, index: 0, length: text.length });
+          }
+          return sentences;
+      }
+  };
+
   // --- 播放控制逻辑 ---
 
-  const playBlock = async (index: number) => {
-      const elements = readableElementsRef.current;
-      if (index >= elements.length) {
-          setIsPlaying(false);
-          clearHighlight();
-          return;
-      }
-
-      const el = elements[index];
-      setCurrentBlockIndex(index);
-      
-      // 直接通过 DOM 操作应用高亮
-      applyHighlight(el);
-      
-      // 滚动/跳转到元素
-      if (rendition) {
-          try {
-             // 尝试找到该元素所属的 document，并使用 EPUB.js 的 navigate 方法
-             // 这比 el.scrollIntoView 更适合分页模式
-             const contents = rendition.getContents().find(c => c.document.contains(el));
-             if (contents) {
-                 const cfi = contents.cfiFromNode(el);
-                 rendition.display(cfi);
-             } else {
-                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-             }
-          } catch (e) {
-              // Fallback
-              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-      }
-
-      const text = el.innerText;
-      if (text) {
-          await playTTS(text);
-      } else {
-          playBlock(index + 1);
-      }
-  };
-
-  const playTTS = async (text: string) => {
-      if (audioRef.current) audioRef.current.pause();
-      window.speechSynthesis.cancel();
-      
+  // Main Async Playback Loop
+  const playSequence = async (startBlockIndex: number, startSentenceIndex: number) => {
       setIsPlaying(true);
+      isPlayingRef.current = true;
+      
+      const elements = readableElementsRef.current;
 
-      if (settings.tts.enabled) {
-          try {
-              const blob = await TTSService.generateSpeech(text, settings.tts);
-              const url = URL.createObjectURL(blob);
-              if (audioRef.current) {
-                  audioRef.current.src = url;
-                  audioRef.current.play();
-                  setActiveTTSBlob(blob);
-              }
-          } catch (e) {
-              console.warn("Custom TTS failed, fallback to browser.", e);
-              playBrowserTTS(text);
+      for (let b = startBlockIndex; b < elements.length; b++) {
+          const el = elements[b];
+          if (!isPlayingRef.current) break;
+
+          playbackStateRef.current = { blockIndex: b, sentenceIndex: 0 };
+          
+          // Scroll/Flip to page if needed
+          if (rendition) {
+               try {
+                   // Ensure element is visible
+                   const contents = rendition.getContents().find(c => c.document.contains(el));
+                   if (contents) {
+                        // Only navigate if we are far away? EPUB.js handles display(cfi) well.
+                        const cfi = contents.cfiFromNode(el);
+                        // Avoid constant flipping if on same page
+                        // rendition.display(cfi); 
+                        // Actually, display(cfi) is safe, checks location.
+                        await rendition.display(cfi);
+                   } else {
+                       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                   }
+               } catch(e) {}
           }
-      } else {
-          playBrowserTTS(text);
+
+          const text = el.innerText;
+          const segments = getSentences(text, settings.language);
+
+          // Iterate sentences in block
+          const startIndex = (b === startBlockIndex) ? startSentenceIndex : 0;
+          
+          for (let s = startIndex; s < segments.length; s++) {
+              if (!isPlayingRef.current) break;
+              
+              playbackStateRef.current = { blockIndex: b, sentenceIndex: s };
+              const segment = segments[s];
+              
+              // Highlight Sentence
+              let cfiToClear: string | null = null;
+              if (settings.syncTextHighlight) {
+                  const range = getRangeFromOffset(el, segment.index, segment.length);
+                  if (range && rendition) {
+                      // We use annotations for clean overlay without breaking DOM
+                      // But annotations require valid CFI.
+                      // contents.cfiFromRange(range)
+                      try {
+                          const contents = rendition.getContents().find(c => c.document.contains(el));
+                          if (contents) {
+                              const cfi = contents.cfiFromRange(range);
+                              rendition.annotations.add('highlight', cfi, {}, null, 'audio-highlight');
+                              cfiToClear = cfi;
+                          }
+                      } catch (e) {
+                          // Fallback to block highlight if fine-grained fails
+                          el.classList.add('audio-highlight');
+                      }
+                  } else {
+                       el.classList.add('audio-highlight');
+                  }
+              }
+
+              // Play Audio
+              await playAudioPromise(segment.text);
+
+              // Clear Highlight
+              if (settings.syncTextHighlight) {
+                  if (cfiToClear && rendition) {
+                      rendition.annotations.remove(cfiToClear, 'highlight');
+                  }
+                  el.classList.remove('audio-highlight');
+              }
+          }
       }
+
+      setIsPlaying(false);
+      isPlayingRef.current = false;
   };
 
-  const playBrowserTTS = (text: string) => {
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = settings.language === 'zh' ? 'zh-CN' : 'en-US';
-      
-      u.onend = () => {
-          if (isPlayingRef.current) {
-              playBlock(currentBlockIndexRef.current + 1);
+  const playAudioPromise = (text: string): Promise<void> => {
+      return new Promise(async (resolve) => {
+          if (!isPlayingRef.current) {
+              resolve();
+              return;
           }
-      };
-      
-      u.onerror = () => setIsPlaying(false);
-      window.speechSynthesis.speak(u);
+
+          if (settings.tts.enabled) {
+              // Custom TTS
+              try {
+                  const blob = await TTSService.generateSpeech(text, settings.tts);
+                  const url = URL.createObjectURL(blob);
+                  setActiveTTSBlob(blob);
+                  
+                  if (audioRef.current) {
+                      audioRef.current.src = url;
+                      audioRef.current.play().catch(e => {
+                           console.warn("Play error", e);
+                           resolve();
+                      });
+                      
+                      const onEnd = () => {
+                          cleanup();
+                          resolve();
+                      };
+                      const onError = () => {
+                          cleanup();
+                          resolve();
+                      };
+                      
+                      const cleanup = () => {
+                          if (audioRef.current) {
+                              audioRef.current.removeEventListener('ended', onEnd);
+                              audioRef.current.removeEventListener('error', onError);
+                          }
+                      };
+
+                      audioRef.current.addEventListener('ended', onEnd);
+                      audioRef.current.addEventListener('error', onError);
+                  } else {
+                      resolve();
+                  }
+              } catch (e) {
+                  console.error("Custom TTS failed", e);
+                  resolve(); // Skip on error
+              }
+          } else {
+              // Browser TTS
+              window.speechSynthesis.cancel();
+              const u = new SpeechSynthesisUtterance(text);
+              u.lang = settings.language === 'zh' ? 'zh-CN' : 'en-US';
+              
+              u.onend = () => resolve();
+              u.onerror = () => resolve();
+              
+              window.speechSynthesis.speak(u);
+          }
+      });
   };
 
   const pauseAudio = () => {
+      isPlayingRef.current = false; // Breaks the loop
+      setIsPlaying(false);
+      
       if (settings.tts.enabled && audioRef.current) {
           audioRef.current.pause();
       } else {
-          window.speechSynthesis.pause();
+          window.speechSynthesis.cancel(); // Browser TTS doesn't resume well from mid-sentence usually, simpler to cancel
       }
-      setIsPlaying(false);
   };
 
   const stopAudio = () => {
+      isPlayingRef.current = false;
+      setIsPlaying(false);
       if (audioRef.current) audioRef.current.pause();
       window.speechSynthesis.cancel();
-      setIsPlaying(false);
-      clearHighlight();
       setActiveTTSBlob(null);
+      clearHighlight();
   };
 
   const toggleAudio = useCallback(() => {
     if (isPlaying) {
       pauseAudio();
     } else {
-      // Resume logic
-      if (settings.tts.enabled && audioRef.current && audioRef.current.src && !audioRef.current.ended) {
-         audioRef.current.play().then(() => setIsPlaying(true)).catch(() => playBlock(currentBlockIndexRef.current));
-      } else if (!settings.tts.enabled && window.speechSynthesis.paused) {
-         window.speechSynthesis.resume();
-         setIsPlaying(true);
-      } else {
-          playBlock(currentBlockIndexRef.current);
-      }
+      // Resume from saved state
+      const { blockIndex, sentenceIndex } = playbackStateRef.current;
+      playSequence(blockIndex, sentenceIndex);
     }
-  }, [isPlaying, settings.tts]); 
+  }, [isPlaying, settings.tts, settings.syncTextHighlight]); 
 
-  // Handler for custom audio ended
-  const handleAudioEnded = () => {
-      if (isPlayingRef.current) {
-          playBlock(currentBlockIndexRef.current + 1);
-      }
-  };
-
+  // Handler for HTML audio element updates (for progress bar if implemented)
   const handleTimeUpdate = () => {
       if (!audioRef.current) return;
       setAudioCurrentTime(audioRef.current.currentTime);
   };
 
-  // 优化的 class-based 高亮
-  const applyHighlight = (el: HTMLElement) => {
-      clearHighlight();
-      if (el) {
-          el.classList.add('audio-highlight');
-          // 强制应用样式，防止被 EPUB 内部样式覆盖
-          el.style.setProperty('background-color', 'rgba(255, 224, 71, 0.4)', 'important');
-          el.style.setProperty('box-shadow', '0 0 0 2px rgba(255, 224, 71, 0.8)', 'important');
-          el.style.setProperty('border-radius', '4px', 'important');
-      }
-  };
-
   const clearHighlight = () => {
       if (!rendition) return;
-      // 遍历所有 iframe 文档清除高亮
+      // Clear annotations
+      // Note: epub.js doesn't have a clearAll for specific type easily exposed in types, 
+      // but we remove them individually in the loop. 
+      // This generic clear is for Stop/Pause.
+      // We'll iterate known highlights if we tracked them, or just force redraw/clear via simple DOM
       rendition.getContents().forEach(c => {
           const highlights = c.document.querySelectorAll('.audio-highlight');
-          highlights.forEach((el: any) => {
-              el.classList.remove('audio-highlight');
-              el.style.removeProperty('background-color');
-              el.style.removeProperty('box-shadow');
-              el.style.removeProperty('border-radius');
-          });
+          highlights.forEach((el: any) => el.classList.remove('audio-highlight'));
+          
+          // Clear SVG annotations
+          const containers = c.document.querySelectorAll('g[data-type="highlight"]');
+          containers.forEach((el: any) => el.remove()); // Brute force clear if needed
       });
   };
 
@@ -793,14 +949,14 @@ const App: React.FC = () => {
            </div>
 
            <div className="text-xs text-gray-500 w-1/4 text-right">
-              {settings.tts.enabled ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration)}` : `Page ${currentPage} / ${totalPages}`}
+              {settings.tts.enabled ? `${formatTime(audioCurrentTime)}` : `Page ${currentPage} / ${totalPages}`}
            </div>
 
            <audio 
               ref={audioRef} 
               onTimeUpdate={handleTimeUpdate} 
               onLoadedMetadata={e => setAudioDuration(e.currentTarget.duration)} 
-              onEnded={handleAudioEnded}
+              // onEnded is handled manually in promise
               className="hidden"
            />
         </div>

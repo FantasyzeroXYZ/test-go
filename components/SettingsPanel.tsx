@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { AnkiSettings, AppSettings, FontSize, ThemeType, Language, SpreadMode } from '../types';
 import * as AnkiService from '../services/ankiService';
+import * as TTSService from '../services/ttsService';
 import { t } from '../utils/i18n';
 
 interface SettingsPanelProps {
@@ -48,10 +49,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const [decks, setDecks] = useState<string[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [fields, setFields] = useState<string[]>([]);
+  
+  // TTS State
+  const [ttsStatus, setTtsStatus] = useState<string>('Unknown');
+  const [ttsVoices, setTtsVoices] = useState<string[]>([]);
+  const [loadingVoices, setLoadingVoices] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       testAnki();
+      if (settings.tts.enabled) {
+          fetchVoices();
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
@@ -72,6 +81,29 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     } catch (e) {
       setAnkiStatus('Failed');
     }
+  };
+
+  const testTTS = async () => {
+      setTtsStatus('Testing...');
+      try {
+          const ok = await TTSService.checkConnection(settings.tts);
+          setTtsStatus(ok ? 'Connected' : 'Failed');
+          if (ok) fetchVoices();
+      } catch (e) {
+          setTtsStatus('Error');
+      }
+  };
+
+  const fetchVoices = async () => {
+      setLoadingVoices(true);
+      try {
+          const voices = await TTSService.getVoices(settings.tts);
+          setTtsVoices(voices);
+      } catch (e) {
+          console.error(e);
+      } finally {
+          setLoadingVoices(false);
+      }
   };
 
   const handleModelChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -204,15 +236,22 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {/* Custom TTS Settings */}
             <div className="pt-2 border-t dark:border-gray-700 mt-2">
-                <label className="flex items-center space-x-2 cursor-pointer mb-3">
-                  <input 
-                    type="checkbox" 
-                    checked={settings.tts.enabled}
-                    onChange={(e) => updateTTSSetting('enabled', e.target.checked)}
-                    className="rounded text-primary focus:ring-primary"
-                  />
-                  <span className="font-semibold text-sm dark:text-gray-300">{t('enableCustomTTS', lang)}</span>
-                </label>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={settings.tts.enabled}
+                      onChange={(e) => updateTTSSetting('enabled', e.target.checked)}
+                      className="rounded text-primary focus:ring-primary"
+                    />
+                    <span className="font-semibold text-sm dark:text-gray-300">{t('enableCustomTTS', lang)}</span>
+                  </label>
+                  {settings.tts.enabled && (
+                      <span className={`text-xs px-2 py-0.5 rounded ${ttsStatus === 'Connected' ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'}`}>
+                          {ttsStatus}
+                      </span>
+                  )}
+                </div>
 
                 {settings.tts.enabled && (
                     <div className="space-y-3 pl-2 bg-gray-50 dark:bg-gray-750 p-3 rounded">
@@ -226,9 +265,26 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                                 <input type="number" value={settings.tts.port} onChange={(e) => updateTTSSetting('port', parseInt(e.target.value))} className="w-full p-1 text-sm border rounded dark:bg-gray-700 dark:text-white" />
                             </div>
                         </div>
+                        <button onClick={testTTS} className="w-full py-1 text-xs bg-blue-100 hover:bg-blue-200 text-blue-800 rounded">
+                            {t('testConnection', lang)}
+                        </button>
+
                         <div>
                              <label className="text-xs dark:text-gray-400">{t('voice', lang)}</label>
-                             <input type="text" value={settings.tts.voice} onChange={(e) => updateTTSSetting('voice', e.target.value)} className="w-full p-1 text-sm border rounded dark:bg-gray-700 dark:text-white" placeholder="microsoft_zh-CN-YunxiNeural" />
+                             <div className="relative">
+                                 {ttsVoices.length > 0 ? (
+                                     <select 
+                                        value={settings.tts.voice} 
+                                        onChange={(e) => updateTTSSetting('voice', e.target.value)}
+                                        className="w-full p-1 text-sm border rounded dark:bg-gray-700 dark:text-white"
+                                     >
+                                         {ttsVoices.map(v => <option key={v} value={v}>{v}</option>)}
+                                     </select>
+                                 ) : (
+                                     <input type="text" value={settings.tts.voice} onChange={(e) => updateTTSSetting('voice', e.target.value)} className="w-full p-1 text-sm border rounded dark:bg-gray-700 dark:text-white" placeholder="e.g. microsoft_zh-CN-YunxiNeural" />
+                                 )}
+                                 {loadingVoices && <div className="absolute right-2 top-1 text-xs text-gray-400"><i className="fas fa-spinner fa-spin"></i></div>}
+                             </div>
                         </div>
                          <div className="grid grid-cols-3 gap-2">
                             <div>

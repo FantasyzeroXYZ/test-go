@@ -346,64 +346,72 @@ const App: React.FC = () => {
                  'height': '100vh',
                  'overflow': 'hidden' 
              },
-             // 保留 CSS 规则作为 fallback
+             // 预定义高亮样式
              '.audio-highlight': { 
                  'background-color': 'rgba(255, 224, 71, 0.4) !important', 
                  'box-shadow': '0 0 0 2px rgba(255, 224, 71, 0.8) !important',
                  'border-radius': '4px !important', 
-                 'transition': 'background-color 0.2s'
+                 'transition': 'all 0.2s ease !important'
              }, 
              '::selection': { 'background': '#bfdbfe' }
            });
 
-           // 文本选择监听
-           const handleSelect = () => {
-             const sel = doc.getSelection();
-             if (!sel || sel.isCollapsed) {
-               setSelection(prev => ({ ...prev, visible: false }));
-               return;
-             }
-             const text = sel.toString().trim();
-             if (text.length > 0) {
-                 const rect = sel.getRangeAt(0).getBoundingClientRect();
-                 const iframeRect = readerRef.current?.querySelector('iframe')?.getBoundingClientRect();
-                 if (iframeRect) {
-                     let sentence = text;
-                     try {
-                         const container = sel.getRangeAt(0).startContainer.parentElement?.textContent || "";
-                         if (container) {
-                             // 简单的句子拆分
-                             const sentences = container.match(/[^.!?]+[.!?]+/g) || [container];
-                             sentence = sentences.find((s: string) => s.includes(text))?.trim() || text;
-                         }
-                     } catch(e) {}
+           // 文本选择监听 - 移动端优化 (selectionchange + debounce)
+           let selectionTimeout: any = null;
+           const handleSelectionChange = () => {
+               if (selectionTimeout) clearTimeout(selectionTimeout);
+               selectionTimeout = setTimeout(() => {
+                   const sel = doc.getSelection();
+                   if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+                       setSelection(prev => ({ ...prev, visible: false }));
+                       return;
+                   }
+                   
+                   const text = sel.toString().trim();
+                   try {
+                       const range = sel.getRangeAt(0);
+                       const rect = range.getBoundingClientRect();
+                       const iframeRect = readerRef.current?.querySelector('iframe')?.getBoundingClientRect();
+                       
+                       if (iframeRect) {
+                           let sentence = text;
+                           try {
+                               const container = range.startContainer.parentElement?.textContent || "";
+                               if (container) {
+                                   const sentences = container.match(/[^.!?]+[.!?]+/g) || [container];
+                                   sentence = sentences.find((s: string) => s.includes(text))?.trim() || text;
+                               }
+                           } catch(e) {}
 
-                     setSelection({
-                         visible: true,
-                         x: rect.left + iframeRect.left + (rect.width / 2),
-                         y: rect.top + iframeRect.top,
-                         text,
-                         cfiRange: newRendition.location.start.cfi,
-                         sentence
-                     });
-                 }
-             }
+                           // 获取 CFI 范围
+                           const cfiRange = newRendition.location.start.cfi;
+
+                           setSelection({
+                               visible: true,
+                               x: rect.left + iframeRect.left + (rect.width / 2),
+                               y: rect.top + iframeRect.top,
+                               text,
+                               cfiRange, // 暂用页面 CFI，理想情况是 contents.cfiFromRange(range)
+                               sentence
+                           });
+                       }
+                   } catch (e) {
+                       console.error("Selection calc error", e);
+                   }
+               }, 200); // 200ms 防抖
            };
 
            // 双击播放监听
            const handleDoubleClick = async (e: MouseEvent) => {
                const sel = doc.getSelection();
                // 如果用户正在选择文本，忽略播放
-               if (sel && !sel.isCollapsed) return;
+               if (sel && !sel.isCollapsed && sel.toString().trim()) return;
 
                const target = e.target as HTMLElement;
-               // 向上查找包含文本的块级元素
                let current: HTMLElement | null = target;
                while(current && current.tagName !== 'BODY') {
-                   // 检查该元素是否在我们的播放列表中
                    const index = readableElementsRef.current.indexOf(current);
                    if (index !== -1) {
-                       // 停止之前的，并从这里开始连续播放
                        stopAudio();
                        playBlock(index);
                        return;
@@ -412,9 +420,8 @@ const App: React.FC = () => {
                }
            };
 
-           doc.addEventListener('mouseup', handleSelect);
+           doc.addEventListener('selectionchange', handleSelectionChange);
            doc.addEventListener('dblclick', handleDoubleClick);
-           doc.addEventListener('touchend', () => setTimeout(handleSelect, 100));
         });
       }
     } catch (err) {
@@ -438,25 +445,24 @@ const App: React.FC = () => {
       const el = elements[index];
       setCurrentBlockIndex(index);
       
-      // 使用内联样式高亮 (Improved)
-      applyHighlight(el.id);
+      // 直接通过 DOM 操作应用高亮
+      applyHighlight(el);
       
-      // 确保元素在视图中 (Improved for EPUB pagination)
+      // 滚动/跳转到元素
       if (rendition) {
           try {
-              // 查找包含该元素的 contents 对象
-              const contents = rendition.getContents().find(c => c.document.contains(el));
-              if (contents) {
-                  // 获取 CFI
-                  const cfi = contents.cfiFromNode(el);
-                  // 使用 display 跳转，比 scrollIntoView 更可靠
-                  rendition.display(cfi);
-              } else {
-                  // Fallback for non-paginated or if content lookup fails
-                  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }
+             // 尝试找到该元素所属的 document，并使用 EPUB.js 的 navigate 方法
+             // 这比 el.scrollIntoView 更适合分页模式
+             const contents = rendition.getContents().find(c => c.document.contains(el));
+             if (contents) {
+                 const cfi = contents.cfiFromNode(el);
+                 rendition.display(cfi);
+             } else {
+                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+             }
           } catch (e) {
-              console.warn("Navigation failed", e);
+              // Fallback
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           }
       }
 
@@ -464,13 +470,11 @@ const App: React.FC = () => {
       if (text) {
           await playTTS(text);
       } else {
-          // 如果没有文本（比如空段落），跳过
           playBlock(index + 1);
       }
   };
 
   const playTTS = async (text: string) => {
-      // 不调用 stopAudio()，因为 stopAudio 会清除状态，我们只暂停之前的音频流
       if (audioRef.current) audioRef.current.pause();
       window.speechSynthesis.cancel();
       
@@ -486,8 +490,7 @@ const App: React.FC = () => {
                   setActiveTTSBlob(blob);
               }
           } catch (e) {
-              console.error(e);
-              console.warn("自定义 TTS 失败，切换回浏览器默认 TTS。");
+              console.warn("Custom TTS failed, fallback to browser.", e);
               playBrowserTTS(text);
           }
       } else {
@@ -500,17 +503,12 @@ const App: React.FC = () => {
       u.lang = settings.language === 'zh' ? 'zh-CN' : 'en-US';
       
       u.onend = () => {
-          // 只有当状态仍为播放时（未被用户暂停），才继续下一段
           if (isPlayingRef.current) {
               playBlock(currentBlockIndexRef.current + 1);
           }
       };
       
-      u.onerror = (e) => {
-          console.error("TTS Error", e);
-          setIsPlaying(false);
-      };
-
+      u.onerror = () => setIsPlaying(false);
       window.speechSynthesis.speak(u);
   };
 
@@ -524,43 +522,31 @@ const App: React.FC = () => {
   };
 
   const stopAudio = () => {
-      if (audioRef.current) {
-          audioRef.current.pause();
-      }
+      if (audioRef.current) audioRef.current.pause();
       window.speechSynthesis.cancel();
       setIsPlaying(false);
       clearHighlight();
       setActiveTTSBlob(null);
   };
 
-  // 播放按钮逻辑
   const toggleAudio = useCallback(() => {
     if (isPlaying) {
       pauseAudio();
     } else {
-      // 1. 尝试恢复自定义 TTS
+      // Resume logic
       if (settings.tts.enabled && audioRef.current && audioRef.current.src && !audioRef.current.ended) {
-         audioRef.current.play()
-            .then(() => setIsPlaying(true))
-            .catch(() => playBlock(currentBlockIndexRef.current)); // 如果恢复失败，重新播放当前块
-      } 
-      // 2. 尝试恢复浏览器 TTS
-      else if (!settings.tts.enabled && window.speechSynthesis.paused) {
+         audioRef.current.play().then(() => setIsPlaying(true)).catch(() => playBlock(currentBlockIndexRef.current));
+      } else if (!settings.tts.enabled && window.speechSynthesis.paused) {
          window.speechSynthesis.resume();
          setIsPlaying(true);
-      }
-      // 3. 如果无法恢复，则从当前索引开始播放
-      else {
+      } else {
           playBlock(currentBlockIndexRef.current);
       }
     }
   }, [isPlaying, settings.tts]); 
 
-  // --- 音频事件监听 ---
-  
-  // Custom TTS Ended Handler
+  // Handler for custom audio ended
   const handleAudioEnded = () => {
-      // 只有当状态仍为播放时（未被用户暂停），才继续下一段
       if (isPlayingRef.current) {
           playBlock(currentBlockIndexRef.current + 1);
       }
@@ -568,44 +554,36 @@ const App: React.FC = () => {
 
   const handleTimeUpdate = () => {
       if (!audioRef.current) return;
-      const time = audioRef.current.currentTime;
-      setAudioCurrentTime(time);
+      setAudioCurrentTime(audioRef.current.currentTime);
   };
 
-  const applyHighlight = (elementId: string) => {
-      if (!rendition) return;
+  // 优化的 class-based 高亮
+  const applyHighlight = (el: HTMLElement) => {
       clearHighlight();
-      
-      rendition.getContents().forEach(c => {
-          const el = c.document.getElementById(elementId);
-          if (el) {
-              el.classList.add('audio-highlight');
-              // 强制添加内联样式以保证高亮可见，使用 !important 覆盖任何冲突
-              // Box-shadow 模拟边框，不会引起重排
-              el.style.setProperty('background-color', 'rgba(255, 224, 71, 0.4)', 'important');
-              el.style.setProperty('box-shadow', '0 0 0 2px rgba(255, 224, 71, 0.8)', 'important'); 
-              el.style.setProperty('border-radius', '4px', 'important');
-              el.style.setProperty('transition', 'all 0.2s ease', 'important');
-          }
-      });
+      if (el) {
+          el.classList.add('audio-highlight');
+          // 强制应用样式，防止被 EPUB 内部样式覆盖
+          el.style.setProperty('background-color', 'rgba(255, 224, 71, 0.4)', 'important');
+          el.style.setProperty('box-shadow', '0 0 0 2px rgba(255, 224, 71, 0.8)', 'important');
+          el.style.setProperty('border-radius', '4px', 'important');
+      }
   };
 
   const clearHighlight = () => {
       if (!rendition) return;
+      // 遍历所有 iframe 文档清除高亮
       rendition.getContents().forEach(c => {
-          // 清除样式
           const highlights = c.document.querySelectorAll('.audio-highlight');
           highlights.forEach((el: any) => {
               el.classList.remove('audio-highlight');
               el.style.removeProperty('background-color');
               el.style.removeProperty('box-shadow');
               el.style.removeProperty('border-radius');
-              el.style.removeProperty('transition');
           });
       });
   };
 
-  // --- 词典 & Anki 导出 ---
+  // --- 词典 & Anki ---
   const handleLookup = async () => {
     if (!selection.text) return;
     setDictModalOpen(true);
@@ -632,7 +610,6 @@ const App: React.FC = () => {
   };
 
   const getSelectedAudio = useCallback(async (): Promise<string | null> => {
-      // 仅导出自定义 TTS 音频
       if (settings.tts.enabled) {
           try {
              const blob = await TTSService.generateSpeech(selection.sentence || selection.text, settings.tts);
@@ -646,18 +623,12 @@ const App: React.FC = () => {
                  };
                  reader.readAsDataURL(blob);
              });
-          } catch (e) {
-              console.error("TTS 导出失败", e);
-              return null;
-          }
+          } catch (e) { return null; }
       }
       return null;
-
   }, [selection, ankiSettings, settings.tts]);
 
-  // --- 视图渲染 ---
-
-  // 1. 书架视图
+  // 1. Library View
   if (view === 'library') {
       return (
         <div className={`h-screen flex flex-col bg-gray-50 dark:bg-gray-900 ${settings.theme === 'sepia' ? 'bg-[#f4ecd8]' : ''}`}>
@@ -701,7 +672,6 @@ const App: React.FC = () => {
                                              <i className="fas fa-book-open text-4xl"></i>
                                          </div>
                                      )}
-                                     {/* 删除按钮 */}
                                      <button 
                                         onClick={(e) => deleteBook(book.id, e)}
                                         className="absolute top-2 right-2 bg-red-500 text-white w-8 h-8 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 shadow-lg"
@@ -709,7 +679,6 @@ const App: React.FC = () => {
                                      >
                                          <i className="fas fa-trash-alt text-sm"></i>
                                      </button>
-                                     {/* 进度条 */}
                                      {book.progressCfi && (
                                          <div className="absolute bottom-0 left-0 w-full h-1 bg-gray-300">
                                              <div className="h-full bg-green-500 w-full opacity-80"></div> 
@@ -726,7 +695,6 @@ const App: React.FC = () => {
                  )}
              </main>
 
-             {/* 导入 Loading 遮罩 */}
              {isLoading && (
                  <div className="fixed inset-0 bg-black/50 z-50 flex flex-col items-center justify-center text-white backdrop-blur-sm">
                      <i className="fas fa-circle-notch fa-spin text-5xl mb-4"></i>
@@ -734,7 +702,6 @@ const App: React.FC = () => {
                  </div>
              )}
              
-             {/* 设置面板 */}
              <SettingsPanel 
                 isOpen={settingsOpen} 
                 onClose={() => setSettingsOpen(false)} 
@@ -747,11 +714,9 @@ const App: React.FC = () => {
       );
   }
 
-  // 2. 阅读器视图
+  // 2. Reader View
   return (
     <div className={`h-screen flex flex-col overflow-hidden ${settings.theme === 'sepia' ? 'bg-[#f4ecd8]' : ''}`}>
-      
-      {/* 顶部导航 */}
       <header className="h-14 bg-secondary text-white flex items-center justify-between px-4 shadow-md z-30 shrink-0">
         <div className="flex items-center gap-3">
            <button onClick={goBackToLibrary} className="p-2 hover:bg-white/10 rounded" title={t('backToLibrary', settings.language)}>
@@ -771,10 +736,8 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* 主体区域 */}
       <div className="flex-1 flex relative overflow-hidden">
-        
-        {/* 侧边栏 (目录) */}
+        {/* Sidebar */}
         <div className={`absolute inset-y-0 left-0 w-72 bg-white dark:bg-gray-800 shadow-xl transform transition-transform duration-300 z-20 flex flex-col ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
            <div className="p-4 border-b dark:border-gray-700 font-bold dark:text-gray-200 flex justify-between">
              <span>{t('toc', settings.language)}</span>
@@ -789,9 +752,8 @@ const App: React.FC = () => {
            </div>
         </div>
 
-        {/* 阅读容器 */}
+        {/* Reader Content */}
         <main className="flex-1 relative bg-white dark:bg-gray-900 flex flex-col overflow-hidden">
-           {/* 加载中 */}
            {isLoading && (
              <div className="absolute inset-0 flex items-center justify-center bg-white/80 dark:bg-gray-900/80 z-10">
                <i className="fas fa-spinner fa-spin text-4xl text-primary"></i>
@@ -802,7 +764,6 @@ const App: React.FC = () => {
                 <div id="epub-viewer" ref={readerRef} className="w-full h-full"></div>
            </div>
 
-           {/* 翻页区域 */}
            {book && (
              <>
                <button onClick={() => rendition?.prev()} className="absolute left-2 top-1/2 transform -translate-y-1/2 p-4 text-gray-300 hover:text-primary transition-colors z-10 bg-black/5 hover:bg-black/10 rounded-full">
@@ -816,7 +777,7 @@ const App: React.FC = () => {
         </main>
       </div>
 
-      {/* 底部播放器 */}
+      {/* Bottom Player */}
       {book && (
         <div className="bg-white dark:bg-gray-800 border-t dark:border-gray-700 shrink-0 z-20 h-16 flex items-center px-4 justify-between">
            <div className="text-xs text-gray-500 w-1/4">
@@ -824,21 +785,11 @@ const App: React.FC = () => {
            </div>
            
            <div className="flex items-center gap-6">
-              <button 
-                onClick={() => rendition?.prev()} 
-                className="text-gray-500 hover:text-primary"
-                title={t('prevChap', settings.language)}
-              ><i className="fas fa-backward"></i></button>
-              
+              <button onClick={() => rendition?.prev()} className="text-gray-500 hover:text-primary" title={t('prevChap', settings.language)}><i className="fas fa-backward"></i></button>
               <button onClick={toggleAudio} className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center shadow hover:bg-blue-600">
                 <i className={`fas ${isPlaying ? 'fa-pause' : 'fa-play'}`}></i>
               </button>
-
-              <button 
-                onClick={() => rendition?.next()} 
-                className="text-gray-500 hover:text-primary"
-                title={t('nextChap', settings.language)}
-              ><i className="fas fa-forward"></i></button>
+              <button onClick={() => rendition?.next()} className="text-gray-500 hover:text-primary" title={t('nextChap', settings.language)}><i className="fas fa-forward"></i></button>
            </div>
 
            <div className="text-xs text-gray-500 w-1/4 text-right">
@@ -855,7 +806,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 浮动菜单 */}
       <SelectionMenu 
         selection={selection}
         lang={settings.language}
@@ -865,7 +815,6 @@ const App: React.FC = () => {
         onClose={() => setSelection(p => ({ ...p, visible: false }))}
       />
 
-      {/* 词典模态框 */}
       {dictModalOpen && (
         <DictionaryModal 
           word={selection.text}
@@ -880,7 +829,6 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* 设置面板 */}
       <SettingsPanel 
         isOpen={settingsOpen} 
         onClose={() => setSettingsOpen(false)} 
@@ -893,7 +841,6 @@ const App: React.FC = () => {
   );
 };
 
-// 格式化时间辅助函数
 function formatTime(sec: number) {
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);

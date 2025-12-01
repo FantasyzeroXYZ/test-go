@@ -5,13 +5,10 @@ import react from '@vitejs/plugin-react';
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   
-  // ⚠️ 注意：base 必须匹配你的 GitHub 仓库名称
-  // 例如仓库是 https://github.com/username/test-go
-  // 这里就应该是 '/test-go/'
-  const repoName = '/test-go/';
-
   return {
-    base: repoName,
+    // ⚠️ 关键修改：使用相对路径 './'
+    // 这样无论你的 GitHub 仓库叫什么，或者是 user.github.io，都能正确加载资源
+    base: './', 
     server: {
       port: 3000,
       host: '0.0.0.0',
@@ -19,7 +16,6 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       assetsDir: 'assets',
-      // 构建时清空输出目录
       emptyOutDir: true,
       sourcemap: false
     },

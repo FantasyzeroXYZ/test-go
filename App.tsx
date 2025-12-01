@@ -1,15 +1,13 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ePub from 'epubjs';
-import { Book as BookType, Rendition, NavigationItem, AppSettings, AnkiSettings, DictionaryResult, SmilPar, SelectionState, LibraryBook } from './types';
+import { Book as BookType, Rendition, NavigationItem, AppSettings, AnkiSettings, DictionaryResult, SelectionState, LibraryBook } from './types';
 import SettingsPanel from './components/SettingsPanel';
 import * as DictionaryService from './services/dictionaryService';
 import DictionaryModal from './components/DictionaryModal';
 import SelectionMenu from './components/SelectionMenu';
 import { defaultAnkiSettings, storeMediaFile } from './services/ankiService';
 import { t } from './utils/i18n';
-import { sliceAudioBuffer } from './utils/audioHelper';
-import { parseSmil, resolvePath } from './utils/smilParser';
 import * as TTSService from './services/ttsService';
 import * as StorageService from './services/storageService';
 
@@ -64,19 +62,21 @@ const App: React.FC = () => {
   // --- 文本选择状态 ---
   const [selection, setSelection] = useState<SelectionState>({ visible: false, x: 0, y: 0, text: '', cfiRange: '', sentence: '' });
 
-  // --- 音频 / SMIL 状态 ---
-  const [smilData, setSmilData] = useState<SmilPar[]>([]);
+  // --- 音频状态 ---
   const [audioCurrentTime, setAudioCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [hasEmbeddedAudio, setHasEmbeddedAudio] = useState(false);
-  const [currentPlayingId, setCurrentPlayingId] = useState<string | null>(null);
+  // 使用 ref 来追踪播放状态，以便在回调中获取最新值
+  const isPlayingRef = useRef(false);
 
   // --- 音频对象 ---
   const audioRef = useRef<HTMLAudioElement>(null);
-  const [audioContext] = useState(() => new (window.AudioContext || (window as any).webkitAudioContext)());
-  const [chapterAudioBuffer, setChapterAudioBuffer] = useState<AudioBuffer | null>(null);
   const [activeTTSBlob, setActiveTTSBlob] = useState<Blob | null>(null);
+
+  // --- TTS 播放列表状态 ---
+  const readableElementsRef = useRef<HTMLElement[]>([]);
+  const [currentBlockIndex, setCurrentBlockIndex] = useState(0);
+  const currentBlockIndexRef = useRef(0); // Ref for access in callbacks
 
   // --- 配置状态 ---
   const [settings, setSettings] = useState<AppSettings>(() => {
@@ -109,6 +109,16 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('epub-anki-settings', JSON.stringify(ankiSettings));
   }, [ankiSettings]);
+
+  // 同步 isPlaying 状态到 Ref
+  useEffect(() => {
+      isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  // 同步 currentBlockIndex 到 Ref
+  useEffect(() => {
+      currentBlockIndexRef.current = currentBlockIndex;
+  }, [currentBlockIndex]);
 
   // --- 初始化：加载书架 ---
   useEffect(() => {
@@ -165,6 +175,26 @@ const App: React.FC = () => {
       }
     }
   }, [rendition, settings.fontSize, settings.theme, settings.spread]);
+
+  // --- 扫描文档以获取可读元素 ---
+  const scanDocument = (doc: Document) => {
+      const elements = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote'))
+          .filter(el => {
+              const htmlEl = el as HTMLElement;
+              // 简单的过滤：必须有文本，且不包含其他块级元素（避免重复朗读）
+              const hasText = htmlEl.innerText && htmlEl.innerText.trim().length > 0;
+              const hasBlockChildren = htmlEl.querySelector('p, h1, h2, h3, h4, h5, h6, li, blockquote');
+              return hasText && !hasBlockChildren;
+          }) as HTMLElement[];
+      
+      // 确保每个元素都有 ID
+      elements.forEach((el, i) => {
+          if (!el.id) el.id = `tts-block-${i}-${Date.now()}`;
+      });
+
+      readableElementsRef.current = elements;
+      setCurrentBlockIndex(0); // 重置索引
+  };
 
   // --- 书籍导入逻辑 ---
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -301,13 +331,14 @@ const App: React.FC = () => {
           if (currentBookId) {
               StorageService.updateBookProgress(currentBookId, location.start.cfi);
           }
-          
-          checkAudioForLocation(location, newBook as unknown as BookType);
         });
 
         // 注册内容钩子 (Selection, CSS, Click)
         newRendition.hooks.content.register((contents: any) => {
            const doc = contents.document;
+           
+           // 扫描文档生成播放列表
+           scanDocument(doc);
            
            contents.addStylesheetRules({
              'body': { 
@@ -315,10 +346,12 @@ const App: React.FC = () => {
                  'height': '100vh',
                  'overflow': 'hidden' 
              },
+             // 保留 CSS 规则作为 fallback
              '.audio-highlight': { 
-                 'background-color': '#ffeb3b !important', 
+                 'background-color': '#fde047 !important', 
                  'border-radius': '2px', 
-                 'box-shadow': '0 0 2px rgba(255, 235, 59, 0.5)' 
+                 'box-shadow': '0 0 2px rgba(255, 235, 59, 0.5)',
+                 'transition': 'background-color 0.2s'
              }, 
              '::selection': { 'background': '#bfdbfe' }
            });
@@ -367,21 +400,12 @@ const App: React.FC = () => {
                // 向上查找包含文本的块级元素
                let current: HTMLElement | null = target;
                while(current && current.tagName !== 'BODY') {
-                   // 优先级 1: 检查元素 ID 是否匹配 SMIL (内置音频)
-                   if (hasEmbeddedAudio && smilData.length > 0 && current.id) {
-                       const par = smilData.find(p => p.elementId === current.id);
-                       if (par && audioRef.current) {
-                           audioRef.current.currentTime = par.begin;
-                           audioRef.current.play();
-                           setIsPlaying(true);
-                           return;
-                       }
-                   }
-                   // 优先级 2: 如果没有内置音频，尝试 TTS
-                   if (!hasEmbeddedAudio && current.innerText && current.innerText.trim().length > 1) {
-                       if (!current.id) current.id = 'tts-' + Date.now();
-                       applyHighlight(current.id);
-                       await playTTS(current.innerText);
+                   // 检查该元素是否在我们的播放列表中
+                   const index = readableElementsRef.current.indexOf(current);
+                   if (index !== -1) {
+                       // 停止之前的，并从这里开始连续播放
+                       stopAudio();
+                       playBlock(index);
                        return;
                    }
                    current = current.parentElement;
@@ -401,130 +425,47 @@ const App: React.FC = () => {
     }
   };
 
-  // --- 音频加载逻辑 (路径解析增强) ---
-  const getAudioBlob = async (book: BookType, relativePath: string): Promise<Blob | null> => {
-      // 尝试直接获取
-      try { return await book.archive.getBlob(relativePath); } catch(e) {}
-      
-      // 去除开头的斜杠
-      let cleanPath = relativePath.startsWith('/') ? relativePath.substring(1) : relativePath;
-      try { return await book.archive.getBlob(cleanPath); } catch(e) {}
+  // --- 播放控制逻辑 ---
 
-      // 尝试添加常见前缀
-      const prefixes = ['OEBPS/', 'OPS/'];
-      for (const prefix of prefixes) {
-          if (!cleanPath.startsWith(prefix)) {
-              try { return await book.archive.getBlob(prefix + cleanPath); } catch (e) {}
-          }
+  const playBlock = async (index: number) => {
+      const elements = readableElementsRef.current;
+      if (index >= elements.length) {
+          setIsPlaying(false);
+          clearHighlight();
+          return;
       }
-      // 尝试移除常见前缀
-      for (const prefix of prefixes) {
-          if (cleanPath.startsWith(prefix)) {
-              try { return await book.archive.getBlob(cleanPath.replace(prefix, '')); } catch (e) {}
-          }
-      }
-      return null;
-  };
 
-
-  const checkAudioForLocation = async (location: any, currentBook: BookType) => {
-      const startCfi = location.start.cfi;
-      const spineItem = currentBook.spine.get(startCfi);
-      if (!spineItem) return;
-
-      const overlayHref = spineItem.properties?.['media-overlay'];
+      const el = elements[index];
+      setCurrentBlockIndex(index);
       
-      if (overlayHref) {
-          // 如果已经在播放当前章节的音频，则不重新加载
-          if (hasEmbeddedAudio && smilData.length > 0 && smilData[0].textSrc.includes(spineItem.href)) {
-              return; 
-          }
+      // 使用内联样式高亮
+      applyHighlight(el.id);
+      
+      // 尝试滚动，但不阻塞错误
+      try {
+          // 注意：在 EPUB 分页模式下，scrollIntoView 可能会影响布局，
+          // 但为了确保用户看到，我们仍然尝试平滑滚动到中心。
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } catch (e) {
+          // 忽略滚动错误
+      }
 
-          stopAudio();
-          setHasEmbeddedAudio(true);
-          try {
-              // 加载 SMIL
-              let smilDoc: Document;
-              try {
-                  smilDoc = await currentBook.load(overlayHref);
-              } catch (e) {
-                  const cleanHref = overlayHref.startsWith('/') ? overlayHref.substring(1) : overlayHref;
-                  const alt = `OEBPS/${cleanHref}`;
-                  try {
-                      smilDoc = await currentBook.load(alt);
-                  } catch (e2) {
-                      console.error("加载 SMIL 失败", e2);
-                      throw e2;
-                  }
-              }
-
-              const parsedSmil = parseSmil(smilDoc, overlayHref);
-              setSmilData(parsedSmil);
-
-              if (parsedSmil.length > 0) {
-                  const audioPath = parsedSmil[0].audioSrc;
-                  const blob = await getAudioBlob(currentBook, audioPath);
-                  
-                  if (blob) {
-                      // 解码用于 Anki 剪切
-                      const ab = await blob.arrayBuffer();
-                      const buffer = await audioContext.decodeAudioData(ab);
-                      setChapterAudioBuffer(buffer);
-
-                      const blobUrl = URL.createObjectURL(blob);
-                      if (audioRef.current) {
-                          audioRef.current.src = blobUrl;
-                          audioRef.current.load();
-                      }
-
-                      if (settings.autoPlayAudio) {
-                          setTimeout(() => {
-                              if (audioRef.current) audioRef.current.play();
-                              setIsPlaying(true);
-                          }, 500);
-                      }
-                  } else {
-                      console.warn("未找到音频文件:", audioPath);
-                      setHasEmbeddedAudio(false);
-                  }
-              }
-          } catch (e) {
-              console.error("SMIL 处理错误:", e);
-              setHasEmbeddedAudio(false);
-          }
+      const text = el.innerText;
+      if (text) {
+          await playTTS(text);
       } else {
-          setHasEmbeddedAudio(false);
-          setSmilData([]);
-          setChapterAudioBuffer(null);
+          // 如果没有文本（比如空段落），跳过
+          playBlock(index + 1);
       }
-  };
-
-  const playNextChapterAudio = async () => {
-     if (!book || !rendition) return;
-     // 安全检查: currentSpine 可能为 undefined
-     const currentSpine = book.spine.get(rendition.location.start.cfi);
-     if (!currentSpine) return;
-
-     // 通过索引查找下一章
-     let nextIndex = currentSpine.index + 1;
-     let nextItem = book.spine.get(nextIndex);
-     
-     // 查找下一个包含 media-overlay 的章节
-     while (nextItem) {
-         if (nextItem.properties?.['media-overlay']) {
-             await rendition.display(nextItem.href);
-             return;
-         }
-         nextIndex++;
-         nextItem = book.spine.get(nextIndex);
-         // 安全中断
-         if (nextIndex > book.spine.length) break;
-     }
   };
 
   const playTTS = async (text: string) => {
-      stopAudio();
+      // 不调用 stopAudio()，因为 stopAudio 会清除状态，我们只暂停之前的音频流
+      if (audioRef.current) audioRef.current.pause();
+      window.speechSynthesis.cancel();
       
+      setIsPlaying(true);
+
       if (settings.tts.enabled) {
           try {
               const blob = await TTSService.generateSpeech(text, settings.tts);
@@ -532,12 +473,11 @@ const App: React.FC = () => {
               if (audioRef.current) {
                   audioRef.current.src = url;
                   audioRef.current.play();
-                  setIsPlaying(true);
                   setActiveTTSBlob(blob);
               }
           } catch (e) {
               console.error(e);
-              alert("自定义 TTS 失败，切换回浏览器默认 TTS。");
+              console.warn("自定义 TTS 失败，切换回浏览器默认 TTS。");
               playBrowserTTS(text);
           }
       } else {
@@ -546,15 +486,31 @@ const App: React.FC = () => {
   };
 
   const playBrowserTTS = (text: string) => {
-      window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = settings.language === 'zh' ? 'zh-CN' : 'en-US';
+      
       u.onend = () => {
-          setIsPlaying(false);
-          clearHighlight();
+          // 只有当状态仍为播放时（未被用户暂停），才继续下一段
+          if (isPlayingRef.current) {
+              playBlock(currentBlockIndexRef.current + 1);
+          }
       };
-      setIsPlaying(true);
+      
+      u.onerror = (e) => {
+          console.error("TTS Error", e);
+          setIsPlaying(false);
+      };
+
       window.speechSynthesis.speak(u);
+  };
+
+  const pauseAudio = () => {
+      if (settings.tts.enabled && audioRef.current) {
+          audioRef.current.pause();
+      } else {
+          window.speechSynthesis.pause();
+      }
+      setIsPlaying(false);
   };
 
   const stopAudio = () => {
@@ -567,19 +523,43 @@ const App: React.FC = () => {
       setActiveTTSBlob(null);
   };
 
-  // --- 音频时间更新 & 高亮同步 ---
+  // 播放按钮逻辑
+  const toggleAudio = useCallback(() => {
+    if (isPlaying) {
+      pauseAudio();
+    } else {
+      // 1. 尝试恢复自定义 TTS
+      if (settings.tts.enabled && audioRef.current && audioRef.current.src && !audioRef.current.ended) {
+         audioRef.current.play()
+            .then(() => setIsPlaying(true))
+            .catch(() => playBlock(currentBlockIndexRef.current)); // 如果恢复失败，重新播放当前块
+      } 
+      // 2. 尝试恢复浏览器 TTS
+      else if (!settings.tts.enabled && window.speechSynthesis.paused) {
+         window.speechSynthesis.resume();
+         setIsPlaying(true);
+      }
+      // 3. 如果无法恢复，则从当前索引开始播放
+      else {
+          playBlock(currentBlockIndexRef.current);
+      }
+    }
+  }, [isPlaying, settings.tts]); 
+
+  // --- 音频事件监听 ---
+  
+  // Custom TTS Ended Handler
+  const handleAudioEnded = () => {
+      // 只有当状态仍为播放时（未被用户暂停），才继续下一段
+      if (isPlayingRef.current) {
+          playBlock(currentBlockIndexRef.current + 1);
+      }
+  };
+
   const handleTimeUpdate = () => {
       if (!audioRef.current) return;
       const time = audioRef.current.currentTime;
       setAudioCurrentTime(time);
-
-      if (hasEmbeddedAudio && settings.syncTextHighlight && smilData.length > 0) {
-          const activePar = smilData.find(p => time >= p.begin && time < p.end);
-          if (activePar && activePar.elementId !== currentPlayingId) {
-              setCurrentPlayingId(activePar.elementId);
-              applyHighlight(activePar.elementId);
-          }
-      }
   };
 
   const applyHighlight = (elementId: string) => {
@@ -589,10 +569,17 @@ const App: React.FC = () => {
       rendition.getContents().forEach(c => {
           const el = c.document.getElementById(elementId);
           if (el) {
+              // 添加类（备用）
               el.classList.add('audio-highlight');
               
-              // 自动翻页逻辑
-              rendition.display(el.getAttribute('id') || undefined);
+              // 强制添加内联样式以保证高亮可见，使用 !important 覆盖任何冲突
+              // 使用 cssText 可以一次性添加多个样式并带 important
+              el.style.cssText += `
+                background-color: rgba(253, 224, 71, 0.5) !important; 
+                box-shadow: 0 0 4px rgba(253, 224, 71, 1) !important;
+                border-radius: 4px !important;
+                transition: all 0.2s ease !important;
+              `;
           }
       });
   };
@@ -600,16 +587,21 @@ const App: React.FC = () => {
   const clearHighlight = () => {
       if (!rendition) return;
       rendition.getContents().forEach(c => {
-          c.document.querySelectorAll('.audio-highlight').forEach(el => el.classList.remove('audio-highlight'));
+          // 清除所有高亮类的样式
+          const highlights = c.document.querySelectorAll('.audio-highlight');
+          highlights.forEach((el: any) => {
+              el.classList.remove('audio-highlight');
+              // 清除特定的内联样式
+              el.style.backgroundColor = '';
+              el.style.boxShadow = '';
+              el.style.borderRadius = '';
+              el.style.transition = '';
+              el.style.cssText = el.style.cssText
+                  .replace(/background-color:[^;]+!important;/g, '')
+                  .replace(/box-shadow:[^;]+!important;/g, '')
+                  .replace(/border-radius:[^;]+!important;/g, '');
+          });
       });
-  };
-
-  const handleAudioEnded = () => {
-      setIsPlaying(false);
-      clearHighlight();
-      if (hasEmbeddedAudio) {
-          playNextChapterAudio();
-      }
   };
 
   // --- 词典 & Anki 导出 ---
@@ -639,32 +631,7 @@ const App: React.FC = () => {
   };
 
   const getSelectedAudio = useCallback(async (): Promise<string | null> => {
-      // 1. 导出内置音频片段
-      if (hasEmbeddedAudio && chapterAudioBuffer && smilData.length > 0) {
-          let matchedPar: SmilPar | null = null;
-          rendition?.getContents().forEach(c => {
-             if (matchedPar) return;
-             for (const par of smilData) {
-                 const el = c.document.getElementById(par.elementId);
-                 if (el && el.innerText.includes(selection.text)) {
-                     matchedPar = par;
-                     break;
-                 }
-             }
-          });
-
-          if (matchedPar) {
-              const dur = matchedPar.end - matchedPar.begin;
-              if (dur > 0) {
-                  const base64 = await sliceAudioBuffer(chapterAudioBuffer, matchedPar.begin, dur);
-                  const filename = `anki_epub_${Date.now()}.wav`;
-                  await storeMediaFile(filename, base64, ankiSettings);
-                  return filename;
-              }
-          }
-      }
-
-      // 2. 导出自定义 TTS 音频
+      // 仅导出自定义 TTS 音频
       if (settings.tts.enabled) {
           try {
              const blob = await TTSService.generateSpeech(selection.sentence || selection.text, settings.tts);
@@ -685,7 +652,7 @@ const App: React.FC = () => {
       }
       return null;
 
-  }, [hasEmbeddedAudio, chapterAudioBuffer, smilData, selection, rendition, ankiSettings, settings.tts]);
+  }, [selection, ankiSettings, settings.tts]);
 
   // --- 视图渲染 ---
 
@@ -852,7 +819,7 @@ const App: React.FC = () => {
       {book && (
         <div className="bg-white dark:bg-gray-800 border-t dark:border-gray-700 shrink-0 z-20 h-16 flex items-center px-4 justify-between">
            <div className="text-xs text-gray-500 w-1/4">
-             {hasEmbeddedAudio ? t('embeddedAudio', settings.language) : (settings.tts.enabled ? t('customTTS', settings.language) : t('tts', settings.language))}
+             {settings.tts.enabled ? t('customTTS', settings.language) : t('tts', settings.language)}
            </div>
            
            <div className="flex items-center gap-6">
@@ -862,22 +829,19 @@ const App: React.FC = () => {
                 title={t('prevChap', settings.language)}
               ><i className="fas fa-backward"></i></button>
               
-              <button onClick={() => { isPlaying ? stopAudio() : (hasEmbeddedAudio && audioRef.current ? audioRef.current.play() : null) }} className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center shadow hover:bg-blue-600">
+              <button onClick={toggleAudio} className="w-10 h-10 rounded-full bg-primary text-white flex items-center justify-center shadow hover:bg-blue-600">
                 <i className={`fas ${isPlaying ? 'fa-pause' : 'fa-play'}`}></i>
               </button>
 
               <button 
-                onClick={() => {
-                   if (hasEmbeddedAudio) playNextChapterAudio();
-                   else rendition?.next();
-                }} 
+                onClick={() => rendition?.next()} 
                 className="text-gray-500 hover:text-primary"
                 title={t('nextChap', settings.language)}
               ><i className="fas fa-forward"></i></button>
            </div>
 
            <div className="text-xs text-gray-500 w-1/4 text-right">
-              {hasEmbeddedAudio ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration)}` : `Page ${currentPage} / ${totalPages}`}
+              {settings.tts.enabled ? `${formatTime(audioCurrentTime)} / ${formatTime(audioDuration)}` : `Page ${currentPage} / ${totalPages}`}
            </div>
 
            <audio 

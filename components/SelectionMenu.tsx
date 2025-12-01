@@ -32,7 +32,6 @@ const SelectionMenu: React.FC<SelectionMenuProps> = ({
         title={t('dictionary', lang)}
       >
         <i className="fas fa-book"></i>
-        <span className="hidden sm:inline">{t('dictionary', lang)}</span>
       </button>
       
       <div className="w-px h-4 bg-white/20"></div>
@@ -53,7 +52,6 @@ const SelectionMenu: React.FC<SelectionMenuProps> = ({
         title="Anki (+Audio)"
       >
         <i className="fas fa-plus-circle"></i>
-        <span className="hidden sm:inline">Anki</span>
       </button>
 
       {/* Triangle pointer */}

@@ -17,7 +17,8 @@ export default defineConfig(({ mode }) => {
     },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        // 在 ESM 模块(Vite默认)中，__dirname 不可用，使用 path.resolve('.') 指向项目根目录
+        '@': path.resolve('.'),
       }
     }
   };

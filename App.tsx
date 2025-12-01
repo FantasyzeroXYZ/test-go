@@ -331,184 +331,170 @@ const App: React.FC = () => {
       setView('library');
   };
 
-  // --- 加载书籍数据 (核心阅读器逻辑) ---
-  const loadBookData = async (bookData: ArrayBuffer, initialCfi?: string) => {
+    // --- 加载书籍数据 (核心阅读器逻辑) ---
+    const loadBookData = async (bookData: ArrayBuffer, initialCfi?: string) => {
     setIsLoading(true);
     if (book) book.destroy();
 
     try {
-      const newBook = ePub(bookData);
-      setBook(newBook as unknown as BookType);
-      await newBook.ready;
-      
-      setMetadata(await newBook.loaded.metadata);
-      const nav = await newBook.loaded.navigation;
-      setToc(nav.toc);
+        const newBook = ePub(bookData);
+        setBook(newBook as unknown as BookType);
+        await newBook.ready;
 
-      if (readerRef.current) {
+        setMetadata(await newBook.loaded.metadata);
+        const nav = await newBook.loaded.navigation;
+        setToc(nav.toc);
+
+        if (readerRef.current) {
         const newRendition = newBook.renderTo(readerRef.current.id, {
-          width: '100%',
-          height: '100%',
-          flow: 'paginated', 
-          manager: 'default',
-          spread: settings.spread,
-          minSpreadWidth: 800
+            width: '100%',
+            height: '100%',
+            flow: 'paginated',
+            manager: 'default',
+            spread: settings.spread,
+            minSpreadWidth: 800
         });
 
         setRendition(newRendition as unknown as Rendition);
+
         // 如果有进度，跳转到进度，否则显示首页
         await newRendition.display(initialCfi);
 
         // 监听位置变化，保存进度
         newRendition.on('relocated', (location: any) => {
-          if(location.start.displayed) {
-              setCurrentPage(location.start.displayed.page);
-              setTotalPages(location.start.displayed.total);
-          }
-          // 保存阅读进度到数据库
-          if (currentBookId) {
-              StorageService.updateBookProgress(currentBookId, location.start.cfi);
-          }
-          
-          // Stop audio if page changes manually to prevent confusing state
-          if (isPlayingRef.current) {
-             // Optional: Decide if you want to stop audio on page turn
-             // stopAudio(); 
-          }
+            if (location.start.displayed) {
+            setCurrentPage(location.start.displayed.page);
+            setTotalPages(location.start.displayed.total);
+            }
+            if (currentBookId) {
+            StorageService.updateBookProgress(currentBookId, location.start.cfi);
+            }
+
+            if (isPlayingRef.current) {
+            // stopAudio(); // 可选：页面切换时停止音频
+            }
         });
 
         // 注册内容钩子 (Selection, CSS, Click)
         newRendition.hooks.content.register((contents: any) => {
-           const doc = contents.document;
-           
-           // 扫描文档生成播放列表
-           scanDocument(doc);
-           
-           contents.addStylesheetRules({
-             'body': { 
-                 'font-family': 'Helvetica, Arial, sans-serif',
-                 'height': '100vh',
-                 'overflow': 'hidden' 
-             },
-             // 预定义高亮样式
-             '.audio-highlight': { 
-                 'background-color': 'rgba(255, 235, 59, 0.4) !important', 
-                 'border-bottom': '2px solid rgba(255, 193, 7, 0.6) !important',
-                 'border-radius': '2px !important'
-             }, 
-             '::selection': { 'background': '#bfdbfe' }
-           });
+            const doc = contents.document;
 
-           // 文本选择监听 - 移动端优化 (selectionchange + debounce)
-           let selectionTimeout: any = null;
-           const handleSelectionChange = () => {
-               if (selectionTimeout) clearTimeout(selectionTimeout);
-               selectionTimeout = setTimeout(() => {
-                   const sel = doc.getSelection();
-                   if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-                       setSelection(prev => ({ ...prev, visible: false }));
-                       return;
-                   }
-                   
-                   const text = sel.toString().trim();
-                   try {
-                       const range = sel.getRangeAt(0);
-                       const rect = range.getBoundingClientRect();
-                       const iframeRect = readerRef.current?.querySelector('iframe')?.getBoundingClientRect();
-                       
-                       if (iframeRect) {
-                           let sentence = text;
-                           // Attempt to grab full sentence context
-                           try {
-                               const container = range.startContainer.parentElement?.textContent || "";
-                               if (container) {
-                                  // Simple regex split
-                                   const sentences = container.match(/[^.!?。！？]+[.!?。！？]+/g) || [container];
-                                   sentence = sentences.find((s: string) => s.includes(text))?.trim() || text;
-                               }
-                           } catch(e) {}
+            // 扫描文档生成播放列表
+            scanDocument(doc);
 
-                           // 获取 CFI 范围
-                           const cfiRange = newRendition.location.start.cfi;
+            // 注入 CSS 样式，允许选择文字
+            contents.addStylesheetRules({
+            '*': {
+                'user-select': 'text !important',
+                '-webkit-user-select': 'text !important',
+                '-webkit-touch-callout': 'text !important'
+            },
+            'body': {
+                'font-family': 'Helvetica, Arial, sans-serif',
+                'height': '100vh',
+                'overflow': 'auto'
+            },
+            '.audio-highlight': {
+                'background-color': 'rgba(255, 235, 59, 0.4) !important',
+                'border-bottom': '2px solid rgba(255, 193, 7, 0.6) !important',
+                'border-radius': '2px !important'
+            },
+            '::selection': { 'background': '#bfdbfe' }
+            });
 
-                           setSelection({
-                               visible: true,
-                               x: rect.left + iframeRect.left + (rect.width / 2),
-                               y: rect.top + iframeRect.top,
-                               text,
-                               cfiRange,
-                               sentence
-                           });
-                       }
-                   } catch (e) {
-                       console.error("Selection calc error", e);
-                   }
-               }, 200); // 200ms 防抖
-           };
+            // 文本选择监听 - 移动端优化 (selectionchange + debounce)
+            let selectionTimeout: any = null;
+            const handleSelectionChange = () => {
+            if (selectionTimeout) clearTimeout(selectionTimeout);
+            selectionTimeout = setTimeout(() => {
+                const sel = doc.getSelection();
+                if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+                setSelection(prev => ({ ...prev, visible: false }));
+                return;
+                }
 
-           // 双击播放监听 - Updated for sentence precision
-           const handleDoubleClick = async (e: MouseEvent) => {
-               const sel = doc.getSelection();
-               // 如果用户正在选择文本，忽略播放
-               if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+                const text = sel.toString().trim();
+                try {
+                const range = sel.getRangeAt(0);
+                const rect = range.getBoundingClientRect();
+                const iframeRect = readerRef.current?.querySelector('iframe')?.getBoundingClientRect();
 
-               const target = e.target as HTMLElement;
-               let current: HTMLElement | null = target;
-               
-               // Find closest readable block
-               while(current && current.tagName !== 'BODY') {
-                   const blockIndex = readableElementsRef.current.indexOf(current);
-                   if (blockIndex !== -1) {
-                       stopAudio(); // Reset state
-                       
-                       // Calculate which sentence within the block was clicked
-                       let sentenceIndex = 0;
-                       try {
-                           if (sel && sel.anchorNode) {
-                               const anchorNode = sel.anchorNode;
-                               const anchorOffset = sel.anchorOffset;
-                               const blockText = current.innerText;
-                               
-                               // Calculate global offset in block text
-                               // This is tricky in DOM, simplified approach:
-                               // Split block into sentences and see which one's range contains the point.
-                               // Better: Use Segmenter on the whole text, map click to segment.
-                               
-                               const segments = getSentences(blockText, settings.language);
-                               
-                               // To find the segment, we need to map DOM position to text offset.
-                               // For now, let's start from beginning of block or simple estimation.
-                               // Implementing full DOM-to-Text offset mapping is complex.
-                               // We'll stick to playing the block, but try to play from index 0.
-                               // If you want precise click-to-sentence, we assume 0 for MVP or try approximate.
-                               
-                               // *Attempt* to find index by text matching if selection is caret
-                               // Not reliable without full range mapping.
-                               // Fallback: Start from beginning of block
-                               sentenceIndex = 0;
-                           }
-                       } catch (e) {
-                           console.warn("Error calculating sentence index", e);
-                       }
+                if (iframeRect) {
+                    let sentence = text;
+                    try {
+                    const container = range.startContainer.parentElement?.textContent || '';
+                    if (container) {
+                        const sentences = container.match(/[^.!?。！？]+[.!?。！？]+/g) || [container];
+                        sentence = sentences.find((s: string) => s.includes(text))?.trim() || text;
+                    }
+                    } catch (e) {}
 
-                       playSequence(blockIndex, sentenceIndex);
-                       return;
-                   }
-                   current = current.parentElement;
-               }
-           };
+                    const cfiRange = newRendition.location.start.cfi;
 
-           doc.addEventListener('selectionchange', handleSelectionChange);
-           doc.addEventListener('dblclick', handleDoubleClick);
+                    setSelection({
+                    visible: true,
+                    x: rect.left + iframeRect.left + rect.width / 2,
+                    y: rect.top + iframeRect.top,
+                    text,
+                    cfiRange,
+                    sentence
+                    });
+                }
+                } catch (e) {
+                console.error('Selection calc error', e);
+                }
+            }, 200);
+            };
+
+            // 双击播放监听
+            const handleDoubleClick = async (e: MouseEvent) => {
+            const sel = doc.getSelection();
+            if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+
+            let current: HTMLElement | null = e.target as HTMLElement;
+
+            while (current && current.tagName !== 'BODY') {
+                const blockIndex = readableElementsRef.current.indexOf(current);
+                if (blockIndex !== -1) {
+                stopAudio();
+
+                let sentenceIndex = 0;
+
+                try {
+                    const blockText = current.innerText;
+                    // 使用浏览器分词或 Segmenter
+                    const segments = getSentences(blockText, settings.language);
+
+                    // 简单策略：点击位置匹配到最近的句子
+                    const clickY = (e as any).clientY;
+                    for (let i = 0; i < segments.length; i++) {
+                    if (blockText.indexOf(segments[i]) !== -1) {
+                        sentenceIndex = i;
+                        break;
+                    }
+                    }
+                } catch (err) {
+                    console.warn('Error calculating sentence index', err);
+                }
+
+                playSequence(blockIndex, sentenceIndex);
+                return;
+                }
+                current = current.parentElement;
+            }
+            };
+
+            doc.addEventListener('selectionchange', handleSelectionChange);
+            doc.addEventListener('dblclick', handleDoubleClick);
         });
-      }
+        }
     } catch (err) {
-      console.error("加载书籍错误:", err);
-      alert("加载书籍失败。");
+        console.error('加载书籍错误:', err);
+        alert('加载书籍失败。');
     } finally {
-      setIsLoading(false);
+        setIsLoading(false);
     }
-  };
+    };
 
   // --- Sentence Splitting Logic ---
   const getSentences = (text: string, lang: string) => {

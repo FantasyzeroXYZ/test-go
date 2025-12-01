@@ -579,6 +579,7 @@ const App: React.FC = () => {
       rendition.getContents().forEach(c => {
           const el = c.document.getElementById(elementId);
           if (el) {
+              // 添加类（备用）
               el.classList.add('audio-highlight');
               // 强制添加内联样式以保证高亮可见，使用 !important 覆盖任何冲突
               // Box-shadow 模拟边框，不会引起重排

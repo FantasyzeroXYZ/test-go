@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>React EPUB Reader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              primary: '#3498db',
+              secondary: '#2c3e50',
+            },
+            animation: {
+              'fade-in': 'fadeIn 0.2s ease-out',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0', transform: 'translate(-50%, 10px)' },
+                '100%': { opacity: '1', transform: 'translate(-50%, 0)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      ::-webkit-scrollbar { width: 6px; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+      .dark ::-webkit-scrollbar-thumb { background: #475569; }
+      
+      /* Ensure Reader takes full height without scrolling container */
+      #epub-viewer {
+        height: 100% !important;
+        width: 100% !important;
+        overflow: hidden !important; 
+        display: flex;
+        flex-direction: column;
+      }
+      #epub-viewer iframe {
+        flex: 1;
+        width: 100% !important;
+        height: 100% !important;
+        display: block; 
+      }
+      /* Fix Highlight in EPUB.js iframe */
+      .epub-container .highlight { fill: yellow; fill-opacity: 0.3; mix-blend-mode: multiply; }
+      
+      /* Global override just in case iframe rules are slow */
+      .audio-highlight { background-color: #fde047 !important; border-radius: 2px; }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "epubjs": "https://aistudiocdn.com/epubjs@^0.3.93"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-300 h-screen overflow-hidden">
+    <div id="root" class="h-full"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+{
+  "name": "React EPUB Reader",
+  "description": "A modular, modern EPUB reader with Anki integration, dictionary lookup, and audio support.",
+  "requestFramePermissions": []
+}

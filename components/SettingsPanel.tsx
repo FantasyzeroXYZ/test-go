@@ -13,6 +13,34 @@ interface SettingsPanelProps {
   onAnkiSettingsChange: (newSettings: AnkiSettings) => void;
 }
 
+// Collapsible Section Component
+const SettingsSection: React.FC<{ 
+    title: string; 
+    children: React.ReactNode; 
+    defaultOpen?: boolean; 
+}> = ({ title, children, defaultOpen = false }) => {
+    const [isOpen, setIsOpen] = useState(defaultOpen);
+
+    return (
+        <div className="border-b dark:border-gray-700 last:border-0">
+            <button 
+                onClick={() => setIsOpen(!isOpen)} 
+                className="flex justify-between items-center w-full py-4 text-left focus:outline-none hover:bg-gray-50 dark:hover:bg-gray-700/50 px-2 rounded transition-colors"
+            >
+                <h3 className="text-lg font-semibold text-primary dark:text-blue-400">{title}</h3>
+                <i className={`fas fa-chevron-down transform transition-transform duration-200 ${isOpen ? 'rotate-180' : ''} text-gray-400`}></i>
+            </button>
+            <div 
+                className={`overflow-hidden transition-all duration-300 ease-in-out ${isOpen ? 'max-h-[1000px] opacity-100 mb-4' : 'max-h-0 opacity-0'}`}
+            >
+                <div className="px-2 pt-2">
+                    {children}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const SettingsPanel: React.FC<SettingsPanelProps> = ({
   isOpen, onClose, settings, onSettingsChange, ankiSettings, onAnkiSettingsChange
 }) => {
@@ -74,6 +102,15 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   const lang = settings.language;
 
+  const getThemeName = (theme: ThemeType) => {
+      switch(theme) {
+          case 'light': return t('themeLight', lang);
+          case 'dark': return t('themeDark', lang);
+          case 'sepia': return t('themeSepia', lang);
+          default: return theme;
+      }
+  };
+
   return (
     <div className={`fixed inset-y-0 right-0 w-full sm:w-96 bg-white dark:bg-gray-800 shadow-2xl transform transition-transform duration-300 z-50 overflow-y-auto ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
       <div className="p-4 border-b dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900 sticky top-0 z-10">
@@ -83,37 +120,33 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </button>
       </div>
 
-      <div className="p-6 space-y-8">
+      <div className="p-6 space-y-1">
         
         {/* Language */}
-        <section>
-             <h3 className="text-lg font-semibold mb-4 text-primary dark:text-blue-400 border-b pb-2">{t('language', lang)}</h3>
-             <div className="flex gap-2">
-                 <button 
-                   onClick={() => updateSetting('language', 'en')}
-                   className={`flex-1 py-1 rounded border ${settings.language === 'en' ? 'bg-primary text-white border-primary' : 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 dark:text-white'}`}
-                 >English</button>
-                 <button 
-                   onClick={() => updateSetting('language', 'zh')}
-                   className={`flex-1 py-1 rounded border ${settings.language === 'zh' ? 'bg-primary text-white border-primary' : 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 dark:text-white'}`}
-                 >中文</button>
-             </div>
-        </section>
+        <SettingsSection title={t('language', lang)} defaultOpen={false}>
+             <select 
+                value={settings.language} 
+                onChange={(e) => updateSetting('language', e.target.value as any)}
+                className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+             >
+                <option value="en">English</option>
+                <option value="zh">中文</option>
+             </select>
+        </SettingsSection>
 
         {/* Appearance */}
-        <section>
-          <h3 className="text-lg font-semibold mb-4 text-primary dark:text-blue-400 border-b pb-2">{t('appearance', lang)}</h3>
+        <SettingsSection title={t('appearance', lang)} defaultOpen={false}>
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium mb-1 dark:text-gray-300">{t('theme', lang)}</label>
               <div className="grid grid-cols-3 gap-2">
-                {(['light', 'dark', 'sepia'] as ThemeType[]).map(t => (
+                {(['light', 'dark', 'sepia'] as ThemeType[]).map(themeType => (
                   <button
-                    key={t}
-                    onClick={() => updateSetting('theme', t)}
-                    className={`p-2 border rounded capitalize ${settings.theme === t ? 'border-primary bg-blue-50 dark:bg-blue-900' : 'border-gray-300 dark:border-gray-600 dark:text-gray-300'}`}
+                    key={themeType}
+                    onClick={() => updateSetting('theme', themeType)}
+                    className={`p-2 border rounded capitalize ${settings.theme === themeType ? 'border-primary bg-blue-50 dark:bg-blue-900 text-primary' : 'border-gray-300 dark:border-gray-600 dark:text-gray-300'}`}
                   >
-                    {t}
+                    {getThemeName(themeType)}
                   </button>
                 ))}
               </div>
@@ -145,11 +178,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
              </div>
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
         {/* Audio / TTS */}
-        <section>
-          <h3 className="text-lg font-semibold mb-4 text-primary dark:text-blue-400 border-b pb-2">{t('audio', lang)}</h3>
+        <SettingsSection title={t('audio', lang)} defaultOpen={false}>
           <div className="space-y-3">
              <label className="flex items-center space-x-2 cursor-pointer">
               <input 
@@ -216,12 +248,11 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 )}
             </div>
           </div>
-        </section>
+        </SettingsSection>
 
         {/* Anki */}
-        <section>
+        <SettingsSection title={t('ankiConnect', lang)} defaultOpen={false}>
           <div className="flex justify-between items-center mb-4 border-b pb-2">
-            <h3 className="text-lg font-semibold text-primary dark:text-blue-400">{t('ankiConnect', lang)}</h3>
             <span className={`text-xs px-2 py-1 rounded ${ankiStatus === 'Connected' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
               {ankiStatus}
             </span>
@@ -325,7 +356,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                </div>
              </div>
           </div>
-        </section>
+        </SettingsSection>
       </div>
     </div>
   );

@@ -16,6 +16,9 @@ export const translations = {
     language: 'Language',
     appearance: 'Appearance',
     theme: 'Theme',
+    themeLight: 'Light',
+    themeDark: 'Dark',
+    themeSepia: 'Sepia',
     fontSize: 'Font Size',
     sizeSmall: 'Small',
     sizeMedium: 'Medium',
@@ -81,6 +84,9 @@ export const translations = {
     language: '语言',
     appearance: '外观',
     theme: '主题',
+    themeLight: '明亮',
+    themeDark: '暗黑',
+    themeSepia: '护眼',
     fontSize: '字体大小',
     sizeSmall: '小',
     sizeMedium: '中',
@@ -135,5 +141,5 @@ export const translations = {
 };
 
 export const t = (key: keyof typeof translations['en'], lang: Language) => {
-  return translations[lang][key] || translations['en'][key];
+  return translations[lang][key] || translations['en'][key] || key;
 };
